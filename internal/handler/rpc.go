@@ -2,26 +2,44 @@ package handler
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
-	"github.com/micro/go-micro/cmd"
-	"github.com/micro/go-micro/errors"
-
-	"golang.org/x/net/context"
+	"github.com/micro/micro/v3/internal/api/handler"
+	"github.com/micro/micro/v3/internal/api/resolver"
+	"github.com/micro/micro/v3/internal/api/resolver/subdomain"
+	"github.com/micro/micro/v3/internal/api/server/cors"
+	"github.com/micro/micro/v3/internal/helper"
+	"github.com/micro/micro/v3/service/client"
+	"github.com/micro/micro/v3/service/errors"
+	goerrors "github.com/micro/micro/v3/service/errors"
 )
 
 type rpcRequest struct {
-	Service string
-	Method  string
-	Address string
-	Request interface{}
+	Service  string
+	Endpoint string
+	Method   string
+	Address  string
+	Request  interface{}
 }
 
-// RPC Handler passes on a JSON or form encoded RPC request to
-// a service.
-func RPC(w http.ResponseWriter, r *http.Request) {
+type rpcHandler struct {
+	resolver resolver.Resolver
+}
+
+func (h *rpcHandler) String() string {
+	return "internal/rpc"
+}
+
+// ServeHTTP passes on a JSON or form encoded RPC request to a service.
+func (h *rpcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "OPTIONS" {
+		cors.SetHeaders(w, r)
+		return
+	}
+
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -29,40 +47,50 @@ func RPC(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	badRequest := func(description string) {
-		e := errors.BadRequest("go.micro.rpc", description)
+		e := errors.BadRequest("micro.rpc", description)
 		w.WriteHeader(400)
 		w.Write([]byte(e.Error()))
 	}
 
-	var service, method, address string
+	var service, endpoint, address string
 	var request interface{}
 
 	// response content type
 	w.Header().Set("Content-Type", "application/json")
 
-	switch r.Header.Get("Content-Type") {
-	case "application/json":
-		b, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			badRequest(err.Error())
-			return
-		}
+	ct := r.Header.Get("Content-Type")
 
+	// Strip charset from Content-Type (like `application/json; charset=UTF-8`)
+	if idx := strings.IndexRune(ct, ';'); idx >= 0 {
+		ct = ct[:idx]
+	}
+
+	switch ct {
+	case "application/json":
 		var rpcReq rpcRequest
 
-		if err = json.Unmarshal(b, &rpcReq); err != nil {
+		d := json.NewDecoder(r.Body)
+		d.UseNumber()
+
+		if err := d.Decode(&rpcReq); err != nil {
 			badRequest(err.Error())
 			return
 		}
 
 		service = rpcReq.Service
-		method = rpcReq.Method
+		endpoint = rpcReq.Endpoint
 		address = rpcReq.Address
 		request = rpcReq.Request
+		if len(endpoint) == 0 {
+			endpoint = rpcReq.Method
+		}
 
 		// JSON as string
 		if req, ok := rpcReq.Request.(string); ok {
-			if err = json.Unmarshal([]byte(req), &request); err != nil {
+			d := json.NewDecoder(strings.NewReader(req))
+			d.UseNumber()
+
+			if err := d.Decode(&request); err != nil {
 				badRequest("error decoding request string: " + err.Error())
 				return
 			}
@@ -70,8 +98,16 @@ func RPC(w http.ResponseWriter, r *http.Request) {
 	default:
 		r.ParseForm()
 		service = r.Form.Get("service")
-		method = r.Form.Get("method")
-		if err := json.Unmarshal([]byte(r.Form.Get("request")), &request); err != nil {
+		endpoint = r.Form.Get("endpoint")
+		address = r.Form.Get("address")
+		if len(endpoint) == 0 {
+			endpoint = r.Form.Get("method")
+		}
+
+		d := json.NewDecoder(strings.NewReader(r.Form.Get("request")))
+		d.UseNumber()
+
+		if err := d.Decode(&request); err != nil {
 			badRequest("error decoding request string: " + err.Error())
 			return
 		}
@@ -82,25 +118,51 @@ func RPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(method) == 0 {
-		badRequest("invalid method")
+	if len(endpoint) == 0 {
+		badRequest("invalid endpoint")
 		return
 	}
 
-	var response map[string]interface{}
+	// create request/response
+	var response json.RawMessage
 	var err error
-	req := (*cmd.DefaultOptions().Client).NewJsonRequest(service, method, request)
+	req := client.DefaultClient.NewRequest(service, endpoint, request, client.WithContentType("application/json"))
+
+	// create context
+	ctx := helper.RequestToContext(r)
+
+	var opts []client.CallOption
+
+	timeout, _ := strconv.Atoi(r.Header.Get("Timeout"))
+	// set timeout
+	if timeout > 0 {
+		opts = append(opts, client.WithRequestTimeout(time.Duration(timeout)*time.Second))
+	}
 
 	// remote call
 	if len(address) > 0 {
-		err = (*cmd.DefaultOptions().Client).CallRemote(context.Background(), address, req, &response)
-	} else {
-		err = (*cmd.DefaultOptions().Client).Call(context.Background(), req, &response)
+		opts = append(opts, client.WithAddress(address))
 	}
+
+	// since services can be running in many domains, we'll use the resolver to determine the domain
+	// which should be used on the call
+	if resolver, ok := h.resolver.(*subdomain.Resolver); ok {
+		if dom := resolver.Domain(r); len(dom) > 0 {
+			opts = append(opts, client.WithNetwork(dom))
+		}
+	}
+
+	// remote call
+	err = client.DefaultClient.Call(ctx, req, &response, opts...)
 	if err != nil {
-		ce := errors.Parse(err.Error())
+		ce := goerrors.Parse(err.Error())
 		switch ce.Code {
 		case 0:
+			// assuming it's totally screwed
+			ce.Code = 500
+			ce.Id = "micro.rpc"
+			ce.Status = http.StatusText(500)
+			ce.Detail = "error during request: " + ce.Detail
 			w.WriteHeader(500)
 		default:
 			w.WriteHeader(int(ce.Code))
@@ -109,7 +171,12 @@ func RPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b, _ := json.Marshal(response)
+	b, _ := response.MarshalJSON()
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	w.Write(b)
+}
+
+// NewRPCHandler returns an initialized RPC handler
+func NewRPCHandler(r resolver.Resolver) handler.Handler {
+	return &rpcHandler{r}
 }

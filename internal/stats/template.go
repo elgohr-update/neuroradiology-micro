@@ -7,15 +7,27 @@ var (
 	<head>
 		<title>Micro Stats</title>
 		<link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css" integrity="sha384-1q8mTJOASx8j1Au+a5WDVnPi2lkFfwwEAa8hDDdjZlpLegxhjVME1fgjWPGmkzs7" crossorigin="anonymous">
+                <link href="https://fonts.googleapis.com/css?family=Source+Code+Pro&display=swap" rel="stylesheet">
+                <style>
+                  html, body {
+                    font-family: 'Source Code Pro', monospace;
+                  }
+                  html a { color: #333333; }
+                  .navbar .navbar-brand { color: #333333; font-weight: bold; font-size: 2.0em; }
+                  .navbar-brand img { display: inline; }
+                  #navBar, .navbar-toggle { margin-top: 15px; }
+                  .icon-bar { background-color: #333333; }
+                </style>
+                <style>
 		<style>
 		{{ template "style" . }}
 		</style>
 	</head>
 	<body>
-	  <nav class="navbar navbar-inverse">
+	  <nav class="navbar">
 	    <div class="container">
 	      <div class="navbar-header">
-		<a class="navbar-brand" href="/">Micro</a>
+                <a class="navbar-brand logo" href="/"><img src="https://micro.mu/logo.png" height=50px width=auto /> Stats</a>
 	      </div>
 	    </div>
 	  </nav>
@@ -77,7 +89,7 @@ var (
               </div>
             </div>
           </div>
-	  <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.4/jquery.min.js"></script>
+	  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/2.1.4/jquery.min.js"></script>
 	  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js" integrity="sha384-0mSbJDEHialfmuBBQP6A4Qrprq5OVfW37PRR3j5ELqxss1yVqOtnepnHVP9aJ7xS" crossorigin="anonymous"></script>
 	  <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/canvasjs/1.7.0/canvasjs.min.js"></script>
 	  {{template "script" . }}
